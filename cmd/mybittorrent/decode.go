@@ -16,7 +16,7 @@ var _ = json.Marshal
 // Example:
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
-func decodeBencode(bencodedString string) (any, int, error) {
+func decodeBencode(bencodedString []byte) (any, int, error) {
 	firstRune := rune(bencodedString[0])
 	if unicode.IsDigit(firstRune) {
 		return decodeString(bencodedString)
@@ -31,7 +31,7 @@ func decodeBencode(bencodedString string) (any, int, error) {
 	}
 }
 
-func decodeString(bencodedString string) (string, int, error) {
+func decodeString(bencodedString []byte) (string, int, error) {
 	var firstColonIndex int
 
 	for i := 0; i < len(bencodedString); i++ {
@@ -41,24 +41,24 @@ func decodeString(bencodedString string) (string, int, error) {
 		}
 	}
 
-	lengthStr := bencodedString[:firstColonIndex]
+	lengthStr := string(bencodedString[:firstColonIndex])
 
 	length, err := strconv.Atoi(lengthStr)
 	if err != nil {
 		return "", -1, err
 	}
 
-	return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], firstColonIndex + 1 + length, nil
+	return string(bencodedString[firstColonIndex+1 : firstColonIndex+1+length]), firstColonIndex + 1 + length, nil
 }
 
-func decodeInteger(bencodedString string) (int, int, error) {
-	endIndex := strings.Index(bencodedString, "e")
-	intPart := bencodedString[1:endIndex]
+func decodeInteger(bencodedString []byte) (int, int, error) {
+	endIndex := strings.Index(string(bencodedString), "e")
+	intPart := string(bencodedString[1:endIndex])
 	v, err := strconv.Atoi(intPart)
 	return v, endIndex + 1, err
 }
 
-func decodeList(bencodedString string) (any, int, error) {
+func decodeList(bencodedString []byte) (any, int, error) {
 	result := []any{}
 	curIndex := 1 // skip initial 'l'
 	for curIndex < len(bencodedString) && rune(bencodedString[curIndex]) != 'e' {
@@ -78,7 +78,7 @@ func decodeList(bencodedString string) (any, int, error) {
 	return result, curIndex + 1, nil
 }
 
-func decodeDictionary(bencodedString string) (any, int, error) {
+func decodeDictionary(bencodedString []byte) (any, int, error) {
 	result := map[string]any{}
 	curIndex := 1
 	for curIndex < len(bencodedString) && rune(bencodedString[curIndex]) != 'e' {
@@ -90,7 +90,7 @@ func decodeDictionary(bencodedString string) (any, int, error) {
 		rawKey := bencodedString[curIndex:]
 		firstRune := rune(rawKey[0])
 		if !unicode.IsDigit(firstRune) {
-			return nil, curIndex, fmt.Errorf("key in dictionary has to be a string: %v", rawKey)
+			return nil, curIndex, fmt.Errorf("key in dictionary has to be a string: %v", string(rawKey))
 		}
 
 		key, newIndex, err = decodeBencode(rawKey)

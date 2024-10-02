@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -23,7 +24,7 @@ func main() {
 		// Uncomment this block to pass the first stage
 		bencodedValue := os.Args[2]
 
-		decoded, _, err := decodeBencode(bencodedValue)
+		decoded, _, err := decodeBencode([]byte(bencodedValue))
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -31,6 +32,38 @@ func main() {
 
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
+	} else if command == "info" {
+		file := os.Args[2]
+		f, err := os.Open(file)
+		if err != nil {
+			fmt.Printf("error opening file: %s", err.Error())
+			return
+		}
+
+		contents, err := io.ReadAll(f)
+		if err != nil {
+			fmt.Printf("error reading file: %s", err.Error())
+			return
+		}
+
+		decoded, _, err := decodeBencode(contents)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		dict, ok := decoded.(map[string]any)
+		if !ok {
+			fmt.Println("invalid bencode")
+			return
+		}
+
+		url := dict["announce"].(string)
+		length := dict["info"].(map[string]any)["length"].(int)
+
+		fmt.Println("Tracker URL:", url)
+		fmt.Println("Length:", length)
+
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
