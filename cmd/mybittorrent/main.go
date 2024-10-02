@@ -23,7 +23,7 @@ func main() {
 		// Uncomment this block to pass the first stage
 		bencodedValue := os.Args[2]
 
-		decoded, err := decodeBencode(bencodedValue)
+		decoded, _, err := decodeBencode(bencodedValue)
 		if err != nil {
 			fmt.Println(err)
 			return

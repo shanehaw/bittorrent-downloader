@@ -1,40 +1,59 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 )
 
 func TestDecodeBencode(t *testing.T) {
 	tests := []struct {
-		expected any
-		name     string
-		input    string
+		expected      string
+		name          string
+		input         string
+		expectedIndex int
 	}{
 		{
-			name:     "string",
-			input:    "5:hello",
-			expected: "hello",
+			name:          "string",
+			input:         "5:hello",
+			expected:      "\"hello\"",
+			expectedIndex: 7,
 		},
 		{
-			name:     "positive_int",
-			input:    "i52e",
-			expected: 52,
+			name:          "positive_int",
+			input:         "i52e",
+			expected:      "52",
+			expectedIndex: 4,
 		},
 		{
-			name:     "positive_int",
-			input:    "i-52e",
-			expected: -52,
+			name:          "positive_int",
+			input:         "i-52e",
+			expected:      "-52",
+			expectedIndex: 5,
+		},
+		{
+			name:          "list",
+			input:         "l5:helloi52ee",
+			expected:      "[\"hello\",52]",
+			expectedIndex: 13,
 		},
 	}
 
 	for _, ts := range tests {
 		t.Run(ts.name, func(t *testing.T) {
-			actual, err := decodeBencode(ts.input)
+			actual, actualIndex, err := decodeBencode(ts.input)
 			if err != nil {
 				t.Fatalf("unexpected error: %s", err.Error())
 			}
-			if actual != ts.expected {
-				t.Fatalf("unexpected value: %v+ instead of %v+", actual, ts.expected)
+			actualJsonBytes, err := json.Marshal(actual)
+			if err != nil {
+				t.Fatalf("unexpected error when marshaling result to Json: %s", err.Error())
+			}
+			actualJson := string(actualJsonBytes)
+			if actualJson != ts.expected {
+				t.Fatalf("unexpected value: %v instead of %v", actualJson, ts.expected)
+			}
+			if actualIndex != ts.expectedIndex {
+				t.Fatalf("unexpected index: %d instead of %d", actualIndex, ts.expectedIndex)
 			}
 		})
 	}
