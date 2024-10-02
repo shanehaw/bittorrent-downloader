@@ -36,6 +36,12 @@ func TestDecodeBencode(t *testing.T) {
 			expected:      "[\"hello\",52]",
 			expectedIndex: 13,
 		},
+		{
+			name:          "dictionary",
+			expected:      `{"foo":"bar","hello":52}`,
+			input:         "d3:foo3:bar5:helloi52ee",
+			expectedIndex: 23,
+		},
 	}
 
 	for _, ts := range tests {
