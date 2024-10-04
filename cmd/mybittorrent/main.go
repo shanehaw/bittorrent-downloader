@@ -2,8 +2,8 @@ package main
 
 import (
 	"crypto/sha1"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -84,9 +84,21 @@ func info(file string) ([]string, error) {
 	h.Write(encodedInfo)
 	hash := hex.EncodeToString(h.Sum(nil))
 
-	return []string{
+	piecesLength := info["piece length"].(int)
+	pieces := info["pieces"].(string)
+	hashes := []string{}
+	for cur := 0; cur < len(pieces); cur += 20 {
+		hashes = append(hashes, hex.EncodeToString([]byte(pieces[cur:cur+20])))
+	}
+
+	result := []string{
 		fmt.Sprintf("Tracker URL: %s", url),
 		fmt.Sprintf("Length: %d", length),
 		fmt.Sprintf("Info Hash: %s", hash),
-	}, nil
+		fmt.Sprintf("Piece Length: %d", piecesLength),
+		"Piece Hashes:",
+	}
+	result = append(result, hashes...)
+
+	return result, nil
 }
