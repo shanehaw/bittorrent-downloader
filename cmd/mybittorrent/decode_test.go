@@ -2,10 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 )
-
 
 func TestDecodeBencode(t *testing.T) {
 	tests := []struct {
@@ -65,19 +63,4 @@ func TestDecodeBencode(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestDecodeFile(t *testing.T) {
-	input := `d8:announce55:http://bittorrent-test-tracker.codecrafters.io/announce10:created by13:mktorrent 1.14:infod6:lengthi92063e4:name10:sample.txt12:piece lengthi32768e6:pieces60:èvöz*èókg&Ã¢-n"uæ vfVsnÿµR­5ðzß¼	r'­Ìee`
-	output, _, err := decodeBencode([]byte(input))
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err.Error())
-	}
-
-	js, err := json.Marshal(output)
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err.Error())
-	}
-	fmt.Println(string(js))
-	t.Fatal()
 }

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/json"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -33,39 +35,58 @@ func main() {
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
 	} else if command == "info" {
-		file := os.Args[2]
-		f, err := os.Open(file)
-		if err != nil {
-			fmt.Printf("error opening file: %s", err.Error())
-			return
-		}
-
-		contents, err := io.ReadAll(f)
-		if err != nil {
-			fmt.Printf("error reading file: %s", err.Error())
-			return
-		}
-
-		decoded, _, err := decodeBencode(contents)
+		lines, err := info(os.Args[2])
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 
-		dict, ok := decoded.(map[string]any)
-		if !ok {
-			fmt.Println("invalid bencode")
-			return
+		for _, line := range lines {
+			fmt.Println(line)
 		}
-
-		url := dict["announce"].(string)
-		length := dict["info"].(map[string]any)["length"].(int)
-
-		fmt.Println("Tracker URL:", url)
-		fmt.Println("Length:", length)
-
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+}
+
+func info(file string) ([]string, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("error opening file: %s", err.Error())
+	}
+
+	contents, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %s", err.Error())
+	}
+
+	decoded, _, err := decodeBencode(contents)
+	if err != nil {
+		return nil, err
+	}
+
+	dict, ok := decoded.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid bencode")
+	}
+
+	url := dict["announce"].(string)
+	info := dict["info"].(map[string]any)
+	length := info["length"].(int)
+
+	encodedInfo, err := encodeBencode(info)
+	if err != nil {
+		return nil, err
+	}
+
+	h := sha1.New()
+	h.Write(encodedInfo)
+	hash := hex.EncodeToString(h.Sum(nil))
+
+	return []string{
+		fmt.Sprintf("Tracker URL: %s", url),
+		fmt.Sprintf("Length: %d", length),
+		fmt.Sprintf("Info Hash: %s", hash),
+	}, nil
 }
