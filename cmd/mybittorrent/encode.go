@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 func encodeBencode(obj any) ([]byte, error) {
 	switch obj.(type) {
@@ -25,7 +28,14 @@ func encodeBencode(obj any) ([]byte, error) {
 	case map[string]any:
 		m := obj.(map[string]any)
 		v := "d"
-		for key, value := range m {
+		sortedKeys := []string{}
+		for key := range m {
+			sortedKeys = append(sortedKeys, key)
+		}
+
+		slices.Sort(sortedKeys)
+		for _, key := range sortedKeys {
+			value := m[key]
 			kv, err := encodeBencode(key)
 			if err != nil {
 				return nil, err

@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
-	// "strings"
 )
 
 // Ensures gofmt doesn't remove the "os" encoding/json import (feel free to remove this!)
@@ -50,6 +50,16 @@ func main() {
 		}
 	} else if command == "peers" {
 		lines, err := peers(os.Args[2])
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+	} else if command == "handshake" {
+		lines, err := performHandshake(os.Args[2], os.Args[3])
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -145,6 +155,7 @@ func peers(file string) ([]string, error) {
 	baseUrl := dict["announce"].(string)
 	info := dict["info"].(map[string]any)
 	length := info["length"].(int)
+
 	encodedInfo, err := encodeBencode(info)
 	if err != nil {
 		return nil, err
@@ -209,4 +220,91 @@ func peers(file string) ([]string, error) {
 
 func createUniqueId() string {
 	return "79106947871722704741"
+}
+
+type handshake struct {
+	infoHash []byte
+	peerID  []byte
+}
+
+// 161.35.46.221:51414
+func performHandshake(file, peerConnectionString string) ([]string, error) {
+	result := []string{}
+
+	contents, err := readFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %s", err.Error())
+	}
+
+	decoded, _, err := decodeBencode(contents)
+	if err != nil {
+		return nil, err
+	}
+
+	dict, ok := decoded.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid bencode")
+	}
+
+	info := dict["info"].(map[string]any)
+	encodedInfo, err := encodeBencode(info)
+	if err != nil {
+		return nil, err
+	}
+
+	h := sha1.New()
+	h.Write(encodedInfo)
+	hashBytes := h.Sum(nil)
+
+
+	hs := handshake{
+		infoHash: hashBytes,
+		peerID:   []byte("00112233445566778899"),
+	}
+
+	message := hs.makeMessage()
+	conn, err := net.Dial("tcp", peerConnectionString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+	}
+	defer conn.Close()
+
+	_, err = conn.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write to tcp connection: %s", err.Error())
+	}
+
+	responseBuffer := make([]byte, 1024)
+	n, err := conn.Read(responseBuffer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+	}
+
+	finalResponse := responseBuffer[:n]
+	responseHandshake := &handshake{}
+	if err := responseHandshake.parseMessage(finalResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse response handshake: %s", err.Error())
+	}
+
+	result = append(result, fmt.Sprintf("Peer ID: %s", hex.EncodeToString(responseHandshake.peerID)))
+	return result, nil
+}
+
+func (hs *handshake) makeMessage() []byte {
+	message := []byte{}
+	message = append(message, []byte{ 19 }...)
+	message = append(message, []byte("BitTorrent protocol")...)
+	message = append(message, []byte{ 0, 0, 0, 0, 0, 0, 0, 0}...)
+	message = append(message, hs.infoHash...)
+	message = append(message, []byte(hs.peerID)...)
+	return message
+}
+
+func (hs *handshake) parseMessage(message []byte) error {
+	if len(message) < 68 {
+		return fmt.Errorf("message was too small")
+	}
+	hs.infoHash = message[28:48]
+	hs.peerID = message[48:68]
+	return nil
 }
