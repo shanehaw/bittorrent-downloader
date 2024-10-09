@@ -7,11 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"time"
 )
+
+const sixteenKilobytes = 16 * 1024
 
 // Ensures gofmt doesn't remove the "os" encoding/json import (feel free to remove this!)
 var _ = json.Marshal
@@ -67,6 +72,15 @@ func main() {
 
 		for _, line := range lines {
 			fmt.Println(line)
+		}
+	} else if command == "download_piece" {
+		pieceIndex, err := strconv.Atoi(os.Args[5])
+		if err != nil {
+			fmt.Printf("failed to parse piece index: %s\n", err.Error())
+		}
+		if err = downloadPiece(os.Args[3], os.Args[4], pieceIndex); err != nil {
+			fmt.Printf("failed to download piece: %s\n", err.Error())
+			os.Exit(1)
 		}
 	} else {
 		fmt.Println("Unknown command: " + command)
@@ -156,6 +170,29 @@ func peers(file string) ([]string, error) {
 	info := dict["info"].(map[string]any)
 	length := info["length"].(int)
 
+	hashBytes, err := getInfoHash(info)
+	if err != nil {
+		return nil, err
+	}
+
+	responseBodyBytes, err := sendRequest(baseUrl, hashBytes, length)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	result = append(result, peers...)
+
+	return result, nil
+}
+
+func getInfoHash(info map[string]any) ([]byte, error) {
 	encodedInfo, err := encodeBencode(info)
 	if err != nil {
 		return nil, err
@@ -164,14 +201,17 @@ func peers(file string) ([]string, error) {
 	h := sha1.New()
 	h.Write(encodedInfo)
 	hashBytes := h.Sum(nil)
+	return hashBytes, nil
+}
 
-	u, err := url.Parse(baseUrl)
+func sendRequest(trackerURL string, infoHash []byte, length int) ([]byte, error) {
+	u, err := url.Parse(trackerURL)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing base url: %s", err.Error())
 	}
 
 	params := url.Values{}
-	params.Add("info_hash", string(hashBytes))
+	params.Add("info_hash", string(infoHash))
 	params.Add("peer_id", createUniqueId())
 	params.Add("port", "6881")
 	params.Add("uploaded", "0")
@@ -196,26 +236,24 @@ func peers(file string) ([]string, error) {
 		return nil, fmt.Errorf("error reading response body: %s", err.Error())
 	}
 
-	resp, _, err := decodeBencode(responseBodyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("error failed to decoded response: %s", err.Error())
-	}
+	return responseBodyBytes, nil
+}
 
-	respDict := resp.(map[string]any)
-	possiblePeers, ok := respDict["peers"]
+func getPeers(dict map[string]any) []string {
+	peers := []string{}
+	possiblePeers, ok := dict["peers"]
 	if ok {
-		peers := []byte(possiblePeers.(string))
-		for i := 0; i < len(peers); i += 6 {
-			ip0 := peers[i]
-			ip1 := peers[i+1]
-			ip2 := peers[i+2]
-			ip3 := peers[i+3]
-			port := binary.BigEndian.Uint16([]byte{peers[i+4], peers[i+5]})
-			result = append(result, fmt.Sprintf("%d.%d.%d.%d:%d", ip0, ip1, ip2, ip3, port))
+		peersBytes := []byte(possiblePeers.(string))
+		for i := 0; i < len(peersBytes); i += 6 {
+			ip0 := peersBytes[i]
+			ip1 := peersBytes[i+1]
+			ip2 := peersBytes[i+2]
+			ip3 := peersBytes[i+3]
+			port := binary.BigEndian.Uint16([]byte{peersBytes[i+4], peersBytes[i+5]})
+			peers = append(peers, fmt.Sprintf("%d.%d.%d.%d:%d", ip0, ip1, ip2, ip3, port))
 		}
 	}
-
-	return result, nil
+	return peers
 }
 
 func createUniqueId() string {
@@ -224,7 +262,7 @@ func createUniqueId() string {
 
 type handshake struct {
 	infoHash []byte
-	peerID  []byte
+	peerID   []byte
 }
 
 // 161.35.46.221:51414
@@ -256,33 +294,13 @@ func performHandshake(file, peerConnectionString string) ([]string, error) {
 	h.Write(encodedInfo)
 	hashBytes := h.Sum(nil)
 
-
 	hs := handshake{
 		infoHash: hashBytes,
 		peerID:   []byte("00112233445566778899"),
 	}
 
-	message := hs.makeMessage()
-	conn, err := net.Dial("tcp", peerConnectionString)
+	responseHandshake, err := doHandshakeWithPeer(peerConnectionString, &hs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
-	}
-	defer conn.Close()
-
-	_, err = conn.Write(message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write to tcp connection: %s", err.Error())
-	}
-
-	responseBuffer := make([]byte, 1024)
-	n, err := conn.Read(responseBuffer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
-	}
-
-	finalResponse := responseBuffer[:n]
-	responseHandshake := &handshake{}
-	if err := responseHandshake.parseMessage(finalResponse); err != nil {
 		return nil, fmt.Errorf("failed to parse response handshake: %s", err.Error())
 	}
 
@@ -292,9 +310,9 @@ func performHandshake(file, peerConnectionString string) ([]string, error) {
 
 func (hs *handshake) makeMessage() []byte {
 	message := []byte{}
-	message = append(message, []byte{ 19 }...)
+	message = append(message, []byte{19}...)
 	message = append(message, []byte("BitTorrent protocol")...)
-	message = append(message, []byte{ 0, 0, 0, 0, 0, 0, 0, 0}...)
+	message = append(message, []byte{0, 0, 0, 0, 0, 0, 0, 0}...)
 	message = append(message, hs.infoHash...)
 	message = append(message, []byte(hs.peerID)...)
 	return message
@@ -307,4 +325,217 @@ func (hs *handshake) parseMessage(message []byte) error {
 	hs.infoHash = message[28:48]
 	hs.peerID = message[48:68]
 	return nil
+}
+
+func downloadPiece(targetLocation, file string, pieceIndex int) error {
+	contents, err := readFile(file)
+	if err != nil {
+		return fmt.Errorf("error reading file: %s", err.Error())
+	}
+
+	decoded, _, err := decodeBencode(contents)
+	if err != nil {
+		return err
+	}
+
+	dict, ok := decoded.(map[string]any)
+	if !ok {
+		return fmt.Errorf("invalid bencode")
+	}
+
+	baseUrl := dict["announce"].(string)
+	info := dict["info"].(map[string]any)
+	length := info["length"].(int)
+	pieceLength := info["piece length"].(int)
+	// pieces := info["pieces"].(string)
+
+	hashBytes, err := getInfoHash(info)
+	if err != nil {
+		return err
+	}
+
+	responseBodyBytes, err := sendRequest(baseUrl, hashBytes, length)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	if len(peers) <= 1 {
+		return fmt.Errorf("did not receive enough peers")
+	}
+
+	peer := peers[1]
+
+	hs := handshake{
+		infoHash: hashBytes,
+		peerID:   []byte("00112233445566778899"),
+	}
+
+	conn, err := net.Dial("tcp", peer)
+	if err != nil {
+		return fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+	}
+	defer conn.Close()
+
+	_, err = doHandshakeOnConnection(conn, &hs)
+	if err != nil {
+		return fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+	}
+
+	response, err := waitForNextMessage(conn)
+	if err != nil {
+		return fmt.Errorf("failed wait for new message: %s", err.Error())
+	}
+	_, _ = parseMessage(response)
+
+	response, err = sendInterested(conn)
+	if err != nil {
+		return fmt.Errorf("failed send interested message: %s", err.Error())
+	}
+	_, _ = parseMessage(response)
+
+	expectedBlocks := pieceLength / sixteenKilobytes
+	if pieceLength%sixteenKilobytes > 0 {
+		expectedBlocks++
+	}
+
+	piece := make([]byte, pieceLength)
+	currentOffset := 0
+	for i := 0; i < expectedBlocks; i++ {
+		length := int(math.Min(sixteenKilobytes, float64(pieceLength-currentOffset)))
+		message := createRequestMessage(pieceIndex, currentOffset, length)
+
+		resp, err := sendMessage(conn, message)
+		if err != nil {
+			return fmt.Errorf("failed to read response after request message: %s", err.Error())
+		}
+
+		_, _, _, block := parsePieceMessage(resp)
+
+		copy(piece[currentOffset:], block)
+		currentOffset += sixteenKilobytes
+	}
+
+	
+	if err = os.WriteFile(targetLocation, piece, 0666); err != nil {
+		fmt.Errorf("failed to open temp file to write piece: %s", err.Error())
+	}
+
+	return nil
+}
+
+func doHandshakeWithPeer(peerConnectionString string, start *handshake) (*handshake, error) {
+	conn, err := net.Dial("tcp", peerConnectionString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+	}
+	defer conn.Close()
+	return doHandshakeOnConnection(conn, start)
+}
+
+func doHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error) {
+	message := start.makeMessage()
+	_, err := conn.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write to tcp connection: %s", err.Error())
+	}
+
+	finalResponse, err := readExactLength(conn, 68)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+	}
+
+	responseHandshake := &handshake{}
+	if err := responseHandshake.parseMessage(finalResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse response handshake: %s", err.Error())
+	}
+
+	return responseHandshake, nil
+}
+
+func readExactLength(conn net.Conn, size int) ([]byte, error) {
+	result := make([]byte, size)
+	_, err := conn.Read(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+	}
+	return result, nil
+}
+
+func waitForNextMessage(conn net.Conn) ([]byte, error) {
+	result := []byte{}
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+	}
+	result = append(result, buffer[:n]...)
+	for n == 1024 {
+		time.Sleep(50 * time.Millisecond)
+		n, err = conn.Read(buffer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+		}
+		result = append(result, buffer[:n]...)
+	}
+	return result, nil
+}
+
+func sendInterested(conn net.Conn) ([]byte, error) {
+	message := []byte{}
+	message = binary.BigEndian.AppendUint32(message, uint32(1))
+	message = append(message, byte(2))
+	_, err := conn.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write interested message")
+	}
+
+	return waitForNextMessage(conn)
+}
+
+func sendMessage(conn net.Conn, message []byte) ([]byte, error) {
+	_, err := conn.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write interested message")
+	}
+
+	return waitForNextMessage(conn)
+}
+
+func parseMessage(message []byte) (byte, []byte) {
+	length := binary.BigEndian.Uint32(message[:4])
+	id := message[4]
+	rest := []byte{}
+	if length > 1 {
+		rest = message[5:]
+	}
+	return id, rest
+}
+
+func parsePieceMessage(message []byte) (byte, uint32, uint32, []byte) {
+	length := binary.BigEndian.Uint32(message[:4])
+	id := message[4]
+	index := binary.BigEndian.Uint32(message[5:9])
+	begin := binary.BigEndian.Uint32(message[9:13])
+	block := []byte{}
+	if length > 1 {
+		block = message[13:]
+	}
+	return id, index, begin, block
+}
+
+func createRequestMessage(index, begin, length int) []byte {
+	message := []byte{}
+	message = binary.BigEndian.AppendUint32(message, uint32(13))
+	message = append(message, byte(6))
+	message = binary.BigEndian.AppendUint32(message, uint32(index))
+	message = binary.BigEndian.AppendUint32(message, uint32(begin))
+	message = binary.BigEndian.AppendUint32(message, uint32(length))
+	return message
 }
