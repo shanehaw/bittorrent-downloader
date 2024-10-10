@@ -411,9 +411,14 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 		length := int(math.Min(sixteenKilobytes, float64(pieceLength-currentOffset)))
 		message := createRequestMessage(pieceIndex, currentOffset, length)
 
-		resp, err := sendMessage(conn, message)
+		_, err := conn.Write(message)
 		if err != nil {
 			return fmt.Errorf("failed to read response after request message: %s", err.Error())
+		}
+
+		resp, err := readExactLength(conn, length)
+		if err != nil {
+			return fmt.Errorf("failed to read piece message: %s", err.Error())
 		}
 
 		_, _, _, block := parsePieceMessage(resp)
@@ -422,9 +427,11 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 		currentOffset += sixteenKilobytes
 	}
 
-	
+	// fmt.Println(len(piece))
+	// fmt.Println(pieceLength)
+
 	if err = os.WriteFile(targetLocation, piece, 0666); err != nil {
-		fmt.Errorf("failed to open temp file to write piece: %s", err.Error())
+		return fmt.Errorf("failed to open temp file to write piece: %s", err.Error())
 	}
 
 	return nil
@@ -460,10 +467,24 @@ func doHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error
 }
 
 func readExactLength(conn net.Conn, size int) ([]byte, error) {
-	result := make([]byte, size)
-	_, err := conn.Read(result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+	readSoFar := 0
+	result := []byte{}
+	numOfZeroReads := 0
+	for readSoFar < size {
+		buf := make([]byte, size-readSoFar)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+		}
+		if n == 0 {
+			numOfZeroReads++
+			fmt.Println("zero read")
+			if numOfZeroReads > 10 {
+				return nil, fmt.Errorf("failed to read from tcp connection: no data")
+			}
+		}
+		result = append(result, buf[:n]...)
+		readSoFar += n
 	}
 	return result, nil
 }
@@ -499,7 +520,7 @@ func sendInterested(conn net.Conn) ([]byte, error) {
 	return waitForNextMessage(conn)
 }
 
-func sendMessage(conn net.Conn, message []byte) ([]byte, error) {
+func sendMessageAndWaitForResponse(conn net.Conn, message []byte) ([]byte, error) {
 	_, err := conn.Write(message)
 	if err != nil {
 		return nil, fmt.Errorf("failed to write interested message")
