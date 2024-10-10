@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -348,7 +349,11 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 	length := info["length"].(int)
 	pieceLength := info["piece length"].(int)
 	fmt.Println(string(contents))
-	// pieces := info["pieces"].(string)
+	pieces := info["pieces"].(string)
+	hashes := []string{}
+	for cur := 0; cur < len(pieces); cur += 20 {
+		hashes = append(hashes, hex.EncodeToString([]byte(pieces[cur:cur+20])))
+	}
 
 	hashBytes, err := getInfoHash(info)
 	if err != nil {
@@ -406,11 +411,12 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 		expectedBlocks++
 	}
 
-	piece := make([]byte, length)
 	currentOffset := 0
 	fmt.Println("length", length)
 	fmt.Println("piece length", pieceLength)
 	fmt.Println("expected blocks", expectedBlocks)
+	fmt.Println(strings.Join(hashes, "\n"))
+	blocks := [][]byte{}
 	for i := 0; i < expectedBlocks; i++ {
 		requestLength := int(math.Min(float64(sixteenKilobytes), float64(pieceLength-currentOffset)))
 		message := createRequestMessage(pieceIndex, currentOffset, requestLength)
@@ -426,15 +432,26 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 			return fmt.Errorf("failed to read piece message: %s", err.Error())
 		}
 
-		id, _, _, block := parsePieceMessage(resp)
-		fmt.Println("id", id)
-		fmt.Println("block", len(block))
-
-		copyTo(&piece, block, currentOffset)
+		_, _, _, block := parsePieceMessage(resp)
+		blocks = append(blocks, block)
 		currentOffset += requestLength
 	}
 
-	if err = os.WriteFile(targetLocation, piece, 0666); err != nil {
+	h := sha1.New()
+	newPiece := []byte{}
+	for _, b := range blocks {
+		newPiece = append(newPiece, b...)
+	}
+
+	_, err = h.Write(newPiece)
+	if err != nil {
+		return fmt.Errorf("failed to generate hash for new piece")
+	}
+	newPieceHashBytes := h.Sum(nil)
+	fmt.Println("new piece length", len(newPiece))
+	fmt.Println(hex.EncodeToString(newPieceHashBytes))
+
+	if err = os.WriteFile(targetLocation, newPiece, 0666); err != nil {
 		return fmt.Errorf("failed to open temp file to write piece: %s", err.Error())
 	}
 
