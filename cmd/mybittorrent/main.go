@@ -477,7 +477,7 @@ func waitForNextMessage(conn net.Conn) ([]byte, error) {
 	}
 	result = append(result, buffer[:n]...)
 	for n == 1024 {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		n, err = conn.Read(buffer)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
