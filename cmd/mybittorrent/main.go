@@ -406,19 +406,31 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 	}
 	_, _ = parseMessage(response)
 
-	expectedBlocks := pieceLength / sixteenKilobytes
-	if pieceLength%sixteenKilobytes > 0 {
+	actualPieceLengthMap := map[int]int{}
+	currentIndex := 0
+	current := 0
+	for current+pieceLength <= length {
+		actualPieceLengthMap[currentIndex] = pieceLength
+		current += pieceLength
+		currentIndex++
+	}
+	actualPieceLengthMap[currentIndex] = length - current
+	fmt.Println(actualPieceLengthMap)
+	actualPieceLength := actualPieceLengthMap[pieceIndex]
+
+	expectedBlocks := actualPieceLength / sixteenKilobytes
+	if actualPieceLength%sixteenKilobytes > 0 {
 		expectedBlocks++
 	}
 
 	currentOffset := 0
 	fmt.Println("length", length)
-	fmt.Println("piece length", pieceLength)
+	fmt.Println("piece length", actualPieceLength)
 	fmt.Println("expected blocks", expectedBlocks)
 	fmt.Println(strings.Join(hashes, "\n"))
 	blocks := [][]byte{}
 	for i := 0; i < expectedBlocks; i++ {
-		requestLength := int(math.Min(float64(sixteenKilobytes), float64(pieceLength-currentOffset)))
+		requestLength := int(math.Min(float64(sixteenKilobytes), float64(actualPieceLength-currentOffset)))
 		message := createRequestMessage(pieceIndex, currentOffset, requestLength)
 
 		_, err := conn.Write(message)
