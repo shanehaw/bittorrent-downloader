@@ -406,28 +406,32 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 		expectedBlocks++
 	}
 
-	piece := make([]byte, pieceLength)
+	piece := make([]byte, length)
 	currentOffset := 0
+	fmt.Println("length", length)
 	fmt.Println("piece length", pieceLength)
+	fmt.Println("expected blocks", expectedBlocks)
 	for i := 0; i < expectedBlocks; i++ {
-		length := int(math.Min(sixteenKilobytes, float64(pieceLength-currentOffset)))
-		message := createRequestMessage(pieceIndex, currentOffset, length)
+		requestLength := int(math.Min(float64(sixteenKilobytes), float64(pieceLength-currentOffset)))
+		message := createRequestMessage(pieceIndex, currentOffset, requestLength)
 
 		_, err := conn.Write(message)
 		if err != nil {
 			return fmt.Errorf("failed to read response after request message: %s", err.Error())
 		}
 
-		fmt.Println("waiting for piece. current offset", currentOffset, "length", length)
-		resp, err := readExactLength(conn, length)
+		fmt.Println("waiting for piece. current offset", currentOffset, "length", requestLength)
+		resp, err := readExactLength(conn, requestLength+13)
 		if err != nil {
 			return fmt.Errorf("failed to read piece message: %s", err.Error())
 		}
 
-		_, _, _, block := parsePieceMessage(resp)
+		id, _, _, block := parsePieceMessage(resp)
+		fmt.Println("id", id)
+		fmt.Println("block", len(block))
 
 		copyTo(&piece, block, currentOffset)
-		currentOffset += sixteenKilobytes
+		currentOffset += requestLength
 	}
 
 	if err = os.WriteFile(targetLocation, piece, 0666); err != nil {
@@ -473,24 +477,21 @@ func doHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error
 }
 
 func readExactLength(conn net.Conn, size int) ([]byte, error) {
-	readSoFar := 0
 	result := []byte{}
 	numOfZeroReads := 0
-	for readSoFar < size {
-		buf := make([]byte, size-readSoFar)
+	for len(result) < size {
+		buf := make([]byte, size-len(result))
 		n, err := conn.Read(buf)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
 		}
 		if n == 0 {
 			numOfZeroReads++
-			fmt.Println("zero read")
 			if numOfZeroReads > 10 {
 				return nil, fmt.Errorf("failed to read from tcp connection: no data")
 			}
 		}
 		result = append(result, buf[:n]...)
-		readSoFar += n
 	}
 	return result, nil
 }
