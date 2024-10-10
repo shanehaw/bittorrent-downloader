@@ -426,18 +426,21 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 
 		_, _, _, block := parsePieceMessage(resp)
 
-		copy(piece[currentOffset:], block)
+		copyTo(&piece, block, currentOffset)
 		currentOffset += sixteenKilobytes
 	}
-
-	// fmt.Println(len(piece))
-	// fmt.Println(pieceLength)
 
 	if err = os.WriteFile(targetLocation, piece, 0666); err != nil {
 		return fmt.Errorf("failed to open temp file to write piece: %s", err.Error())
 	}
 
 	return nil
+}
+
+func copyTo(dst *[]byte, src []byte, index int) {
+	for i := 0; i < len(src); i++ {
+		(*dst)[index+i] = src[i]
+	}
 }
 
 func doHandshakeWithPeer(peerConnectionString string, start *handshake) (*handshake, error) {
