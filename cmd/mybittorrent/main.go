@@ -370,7 +370,7 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 		return fmt.Errorf("did not receive enough peers")
 	}
 
-	peer := peers[1]
+	peer := peers[0]
 
 	hs := handshake{
 		infoHash: hashBytes,
