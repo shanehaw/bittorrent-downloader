@@ -407,6 +407,7 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 
 	piece := make([]byte, pieceLength)
 	currentOffset := 0
+	fmt.Println("piece length", pieceLength)
 	for i := 0; i < expectedBlocks; i++ {
 		length := int(math.Min(sixteenKilobytes, float64(pieceLength-currentOffset)))
 		message := createRequestMessage(pieceIndex, currentOffset, length)
@@ -416,6 +417,7 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 			return fmt.Errorf("failed to read response after request message: %s", err.Error())
 		}
 
+		fmt.Println("waiting for piece. current offset", currentOffset, "length", length)
 		resp, err := readExactLength(conn, length)
 		if err != nil {
 			return fmt.Errorf("failed to read piece message: %s", err.Error())
