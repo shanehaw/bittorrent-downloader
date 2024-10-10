@@ -347,6 +347,7 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 	info := dict["info"].(map[string]any)
 	length := info["length"].(int)
 	pieceLength := info["piece length"].(int)
+	fmt.Println(string(contents))
 	// pieces := info["pieces"].(string)
 
 	hashBytes, err := getInfoHash(info)
