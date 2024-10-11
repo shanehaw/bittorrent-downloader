@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,6 +82,11 @@ func main() {
 		}
 		if err = downloadPiece(os.Args[3], os.Args[4], pieceIndex); err != nil {
 			fmt.Printf("failed to download piece: %s\n", err.Error())
+			os.Exit(1)
+		}
+	} else if command == "download" {
+		if err := downloadFile(os.Args[3], os.Args[4]); err != nil {
+			fmt.Printf("failed to download file: %s\n", err.Error())
 			os.Exit(1)
 		}
 	} else {
@@ -346,21 +352,18 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 
 	baseUrl := dict["announce"].(string)
 	info := dict["info"].(map[string]any)
-	length := info["length"].(int)
+	fileLength := info["length"].(int)
 	pieceLength := info["piece length"].(int)
 	fmt.Println(string(contents))
 	pieces := info["pieces"].(string)
-	hashes := []string{}
-	for cur := 0; cur < len(pieces); cur += 20 {
-		hashes = append(hashes, hex.EncodeToString([]byte(pieces[cur:cur+20])))
-	}
+	hashByIndex := calcPieceHashes(pieces)
 
-	hashBytes, err := getInfoHash(info)
+	infoHashBytes, err := getInfoHash(info)
 	if err != nil {
 		return err
 	}
 
-	responseBodyBytes, err := sendRequest(baseUrl, hashBytes, length)
+	responseBodyBytes, err := sendRequest(baseUrl, infoHashBytes, fileLength)
 	if err != nil {
 		return fmt.Errorf("error reading response body: %s", err.Error())
 	}
@@ -372,15 +375,14 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 
 	respDict := resp.(map[string]any)
 	peers := getPeers(respDict)
-	if len(peers) <= 1 {
+	if len(peers) < 1 {
 		return fmt.Errorf("did not receive enough peers")
 	}
 
 	peer := peers[0]
-
 	hs := handshake{
-		infoHash: hashBytes,
-		peerID:   []byte("00112233445566778899"),
+		infoHash: infoHashBytes,
+		peerID:   createRandomID(),
 	}
 
 	conn, err := net.Dial("tcp", peer)
@@ -406,28 +408,10 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 	}
 	_, _ = parseMessage(response)
 
-	actualPieceLengthMap := map[int]int{}
-	currentIndex := 0
-	current := 0
-	for current+pieceLength <= length {
-		actualPieceLengthMap[currentIndex] = pieceLength
-		current += pieceLength
-		currentIndex++
-	}
-	actualPieceLengthMap[currentIndex] = length - current
-	fmt.Println(actualPieceLengthMap)
-	actualPieceLength := actualPieceLengthMap[pieceIndex]
-
-	expectedBlocks := actualPieceLength / sixteenKilobytes
-	if actualPieceLength%sixteenKilobytes > 0 {
-		expectedBlocks++
-	}
+	actualPieceLength := getPieceLengthForIndex(fileLength, pieceLength, pieceIndex)
+	expectedBlocks := calcExpectedBlocks(actualPieceLength)
 
 	currentOffset := 0
-	fmt.Println("length", length)
-	fmt.Println("piece length", actualPieceLength)
-	fmt.Println("expected blocks", expectedBlocks)
-	fmt.Println(strings.Join(hashes, "\n"))
 	blocks := [][]byte{}
 	for i := 0; i < expectedBlocks; i++ {
 		requestLength := int(math.Min(float64(sixteenKilobytes), float64(actualPieceLength-currentOffset)))
@@ -438,7 +422,6 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 			return fmt.Errorf("failed to read response after request message: %s", err.Error())
 		}
 
-		fmt.Println("waiting for piece. current offset", currentOffset, "length", requestLength)
 		resp, err := readExactLength(conn, requestLength+13)
 		if err != nil {
 			return fmt.Errorf("failed to read piece message: %s", err.Error())
@@ -449,19 +432,22 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 		currentOffset += requestLength
 	}
 
-	h := sha1.New()
 	newPiece := []byte{}
 	for _, b := range blocks {
 		newPiece = append(newPiece, b...)
 	}
 
-	_, err = h.Write(newPiece)
+	pieceHash, err := hashBytesNew(newPiece)
 	if err != nil {
 		return fmt.Errorf("failed to generate hash for new piece")
 	}
-	newPieceHashBytes := h.Sum(nil)
-	fmt.Println("new piece length", len(newPiece))
-	fmt.Println(hex.EncodeToString(newPieceHashBytes))
+
+	expectedHash := hashByIndex[pieceIndex]
+	fmt.Println("eHash", expectedHash)
+	fmt.Println("aHash", pieceHash)
+	if pieceHash != expectedHash {
+		return fmt.Errorf("piece hash did not match hash in torrent file. actual: %s, expected: %s", pieceHash, expectedHash)
+	}
 
 	if err = os.WriteFile(targetLocation, newPiece, 0666); err != nil {
 		return fmt.Errorf("failed to open temp file to write piece: %s", err.Error())
@@ -470,10 +456,62 @@ func downloadPiece(targetLocation, file string, pieceIndex int) error {
 	return nil
 }
 
-func copyTo(dst *[]byte, src []byte, index int) {
-	for i := 0; i < len(src); i++ {
-		(*dst)[index+i] = src[i]
+func calcPieceHashes(rawPieces string) map[int]string {
+	hashByIndex := make(map[int]string)
+	index := 0
+	for cur := 0; cur < len(rawPieces); cur += 20 {
+		h := hex.EncodeToString([]byte(rawPieces[cur : cur+20]))
+		hashByIndex[index] = h
+		index++
 	}
+	return hashByIndex
+}
+
+func calcExpectedBlocks(pieceLength int) int {
+	expectedBlocks := pieceLength / sixteenKilobytes
+	if pieceLength%sixteenKilobytes > 0 {
+		expectedBlocks++
+	}
+	return expectedBlocks
+}
+
+func getPieceLengthForIndex(fileLength, pieceLength, pieceIndex int) int {
+	pieceLengthsByIndex := calcPieceLengthMap(fileLength, pieceLength)
+	return pieceLengthsByIndex[pieceIndex]
+}
+
+func calcPieceLengthMap(fileLength, pieceLength int) map[int]int {
+	result := make(map[int]int)
+	currentIndex := 0
+	current := 0
+	for current+pieceLength <= fileLength {
+		result[currentIndex] = pieceLength
+		current += pieceLength
+		currentIndex++
+	}
+	result[currentIndex] = fileLength - current
+	return result
+}
+
+func hashBytesNew(obj []byte) (string, error) {
+	h := sha1.New()
+	_, err := h.Write(obj)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func createRandomID() []byte {
+	return []byte(randomString(20))
+}
+
+func randomString(length int) string {
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = byte(rand.Intn(10) + 48)
+	}
+	return string(b)
 }
 
 func doHandshakeWithPeer(peerConnectionString string, start *handshake) (*handshake, error) {
@@ -595,4 +633,246 @@ func createRequestMessage(index, begin, length int) []byte {
 	message = binary.BigEndian.AppendUint32(message, uint32(begin))
 	message = binary.BigEndian.AppendUint32(message, uint32(length))
 	return message
+}
+
+func downloadFile(downloadTarget, file string) error {
+	contents, err := readFile(file)
+	if err != nil {
+		return fmt.Errorf("error reading file: %s", err.Error())
+	}
+
+	decoded, _, err := decodeBencode(contents)
+	if err != nil {
+		return err
+	}
+
+	dict, ok := decoded.(map[string]any)
+	if !ok {
+		return fmt.Errorf("invalid bencode")
+	}
+
+	baseUrl := dict["announce"].(string)
+	info := dict["info"].(map[string]any)
+	fileLength := info["length"].(int)
+	pieceLength := info["piece length"].(int)
+	fmt.Println(string(contents))
+	pieces := info["pieces"].(string)
+	hashByIndex := calcPieceHashes(pieces)
+
+	infoHashBytes, err := getInfoHash(info)
+	if err != nil {
+		return err
+	}
+
+	responseBodyBytes, err := sendRequest(baseUrl, infoHashBytes, fileLength)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	if len(peers) < 1 {
+		return fmt.Errorf("did not receive enough peers")
+	}
+
+	workers := make([]pieceDownloader, len(peers))
+	for i, p := range peers {
+		workers[i] = pieceDownloader{
+			peerConnectionString: p,
+			infoHashBytes:        infoHashBytes,
+			fileLength:           fileLength,
+			pieceLength:          pieceLength,
+			pieceHashesByIndex:   hashByIndex,
+		}
+	}
+
+	// comms channels
+	results := make(chan downloadedPiece)
+	outrightFailures := make(chan int)
+	piecesToDownload := make(chan pieceToDownload)
+
+	// start workers
+	fmt.Println("starting workers...")
+	var pieceDownloaderWaitGroup sync.WaitGroup
+	cleanup := sync.OnceFunc(func() {
+		close(results)
+		close(outrightFailures)
+	})
+	for _, w := range workers {
+		pieceDownloaderWaitGroup.Add(1)
+		go func() {
+			defer pieceDownloaderWaitGroup.Done()
+			for downloadedablePiece := range piecesToDownload {
+				pieceIndex := downloadedablePiece.pieceIndex
+				pieceBytes, err := w.Download(pieceIndex)
+				if err != nil {
+					fmt.Printf("failed to download piece index %d, reinserting to queue: %s\n", pieceIndex, err.Error())
+					if downloadedablePiece.attempt <= 10 {
+						time.Sleep(100 * time.Millisecond)
+						piecesToDownload <- pieceToDownload{
+							pieceIndex: pieceIndex,
+							attempt:    downloadedablePiece.attempt + 1,
+						}
+					} else {
+						outrightFailures <- pieceIndex
+					}
+				} else {
+					results <- downloadedPiece{
+						pieceIndex: pieceIndex,
+						piece:      pieceBytes,
+					}
+				}
+			}
+			cleanup()
+		}()
+	}
+
+	// seed queue
+	fmt.Println("seeding pieces to download queue")
+	for pieceIndex := range hashByIndex {
+		piecesToDownload <- pieceToDownload{
+			pieceIndex: pieceIndex,
+			attempt:    1,
+		}
+	}
+
+	// collect results from workers
+	fmt.Println("collecting results from workers")
+	downloadedFilePieces := make(map[int][]byte)
+	failedFilePieces := make(map[int]any)
+	for len(downloadedFilePieces)+len(failedFilePieces) < len(hashByIndex) {
+		select {
+		case dp := <-results:
+			downloadedFilePieces[dp.pieceIndex] = dp.piece
+		case fp := <-outrightFailures:
+			failedFilePieces[fp] = nil
+		}
+	}
+
+	// stop workers
+	fmt.Println("waiting for workers to finish...")
+	close(piecesToDownload)
+	pieceDownloaderWaitGroup.Wait()
+	fmt.Println("workers finished. Checking results...")
+
+	// if any pice persistently failed, then fail
+	if len(failedFilePieces) > 0 {
+		return fmt.Errorf("failed to download one or more pieces: %d", len(failedFilePieces))
+	}
+
+	// collect pieces into file
+	fmt.Println("all pieces downloaded and hashes checked, piecing together file")
+	fileBytes := []byte{}
+	for pieceIndex := 0; pieceIndex < len(hashByIndex); pieceIndex++ {
+		piece, ok := downloadedFilePieces[pieceIndex]
+		if !ok {
+			return fmt.Errorf("missing download piece! %d", pieceIndex)
+		}
+		fileBytes = append(fileBytes, piece...)
+	}
+
+	// write file
+	fmt.Println("writing file")
+	if err = os.WriteFile(downloadTarget, fileBytes, 0666); err != nil {
+		return fmt.Errorf("failed to open temp file to write file: %s", err.Error())
+	}
+
+	fmt.Println("successfully wrote file. Finished")
+	return nil
+}
+
+type pieceDownloader struct {
+	peerConnectionString string
+	infoHashBytes        []byte
+	fileLength           int
+	pieceLength          int
+	pieceHashesByIndex   map[int]string
+}
+
+type pieceToDownload struct {
+	pieceIndex int
+	attempt    int
+}
+
+type downloadedPiece struct {
+	pieceIndex int
+	piece      []byte
+}
+
+func (p pieceDownloader) Download(pieceIndex int) ([]byte, error) {
+	peer := p.peerConnectionString
+	hs := handshake{
+		infoHash: p.infoHashBytes,
+		peerID:   createRandomID(),
+	}
+
+	conn, err := net.Dial("tcp", peer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+	}
+	defer conn.Close()
+
+	_, err = doHandshakeOnConnection(conn, &hs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+	}
+
+	response, err := waitForNextMessage(conn)
+	if err != nil {
+		return nil, fmt.Errorf("failed wait for new message: %s", err.Error())
+	}
+	_, _ = parseMessage(response)
+
+	response, err = sendInterested(conn)
+	if err != nil {
+		return nil, fmt.Errorf("failed send interested message: %s", err.Error())
+	}
+	_, _ = parseMessage(response)
+
+	actualPieceLength := getPieceLengthForIndex(p.fileLength, p.pieceLength, pieceIndex)
+	expectedBlocks := calcExpectedBlocks(actualPieceLength)
+
+	currentOffset := 0
+	blocks := [][]byte{}
+	for i := 0; i < expectedBlocks; i++ {
+		requestLength := int(math.Min(float64(sixteenKilobytes), float64(actualPieceLength-currentOffset)))
+		message := createRequestMessage(pieceIndex, currentOffset, requestLength)
+
+		_, err := conn.Write(message)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response after request message: %s", err.Error())
+		}
+
+		resp, err := readExactLength(conn, requestLength+13)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read piece message: %s", err.Error())
+		}
+
+		_, _, _, block := parsePieceMessage(resp)
+		blocks = append(blocks, block)
+		currentOffset += requestLength
+	}
+
+	downloadedPiece := []byte{}
+	for _, b := range blocks {
+		downloadedPiece = append(downloadedPiece, b...)
+	}
+
+	pieceHash, err := hashBytesNew(downloadedPiece)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate hash for new piece")
+	}
+
+	expectedHash := p.pieceHashesByIndex[pieceIndex]
+	fmt.Println(pieceIndex, ":", time.Now().Format(time.RFC3339), "eHash", expectedHash)
+	fmt.Println(pieceIndex, ":", time.Now().Format(time.RFC3339), "aHash", pieceHash)
+	if pieceHash != expectedHash {
+		return nil, fmt.Errorf("piece hash did not match hash in torrent file. actual: %s, expected: %s", pieceHash, expectedHash)
+	}
+	return downloadedPiece, nil
 }
