@@ -95,6 +95,11 @@ func main() {
 			fmt.Printf("failed to parse magnet: %s\n", err.Error())
 			os.Exit(1)
 		}
+	} else if command == "magnet_handshake" {
+		if err := magnet_handshake(os.Args[2]); err != nil {
+			fmt.Printf("failed to perform magnet handshake: %s\n", err.Error())
+			os.Exit(1)
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -331,6 +336,16 @@ func (hs *handshake) makeMessage() []byte {
 	return message
 }
 
+func (hs *handshake) makeExtendedMessage() []byte {
+	message := []byte{}
+	message = append(message, []byte{19}...)
+	message = append(message, []byte("BitTorrent protocol")...)
+	message = append(message, []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00}...)
+	message = append(message, hs.infoHash...)
+	message = append(message, []byte(hs.peerID)...)
+	return message
+}
+
 func (hs *handshake) parseMessage(message []byte) error {
 	if len(message) < 68 {
 		return fmt.Errorf("message was too small")
@@ -547,6 +562,27 @@ func doHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error
 	}
 
 	return responseHandshake, nil
+}
+
+func doExtendedHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error) {
+	message := start.makeExtendedMessage()
+	_, err := conn.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write to tcp connection: %s", err.Error())
+	}
+
+	finalResponse, err := readExactLength(conn, 68)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
+	}
+
+	responseHandshake := &handshake{}
+	if err := responseHandshake.parseMessage(finalResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse response handshake: %s", err.Error())
+	}
+
+	return responseHandshake, nil
+
 }
 
 func readExactLength(conn net.Conn, size int) ([]byte, error) {
@@ -890,24 +926,89 @@ func (p pieceDownloader) Download(pieceIndex int) ([]byte, error) {
 }
 
 func magnet_parse(link string) error {
+	data, err := parseMagnetLink(link)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Tracker URL: %s\n", data.trackerURL)
+	fmt.Printf("Info Hash: %s\n", data.infoHash)
+	return nil
+}
+
+func parseMagnetLink(link string) (*magnetLinkData, error) {
 	magnetUrl, err := url.Parse(link)
 	if err != nil {
-		return fmt.Errorf("failed to parse magnet url: %s", err.Error())
+		return nil, fmt.Errorf("failed to parse magnet url: %s", err.Error())
 	}
 
 	query := magnetUrl.Query()
 	xt := query.Get("xt")
-	// dn := query.Get("dn")
+	dn := query.Get("dn")
 	tr := query.Get("tr")
 
 	if !strings.HasPrefix(xt, "urn:btih:") {
-		return fmt.Errorf("unexpected magnet url type. Missing urn:bith")
+		return nil, fmt.Errorf("unexpected magnet url type. Missing urn:bith")
 	}
 
 	infoHash := xt[9:]
 
-	fmt.Printf("Tracker URL: %s\n", tr)
-	fmt.Printf("Info Hash: %s\n", infoHash)
+	return &magnetLinkData{
+		trackerURL: tr,
+		fileName:   dn,
+		infoHash:   infoHash,
+	}, nil
+}
+
+type magnetLinkData struct {
+	trackerURL string
+	fileName   string
+	infoHash   string
+}
+
+func magnet_handshake(link string) error {
+	data, err := parseMagnetLink(link)
+	if err != nil {
+		return fmt.Errorf("failed to parse magnet link: %s", err.Error())
+	}
+
+	infoHashBytes, err := hex.DecodeString(data.infoHash)
+	if err != nil {
+		return fmt.Errorf("failed to decode info hash: %s", err.Error())
+	}
+
+	responseBodyBytes, err := sendRequest(data.trackerURL, infoHashBytes, 999)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	if len(peers) < 1 {
+		return fmt.Errorf("did not receive enough peers")
+	}
+
+	peer := peers[0]
+	hs := handshake{
+		infoHash: infoHashBytes,
+		peerID:   createRandomID(),
+	}
+
+	conn, err := net.Dial("tcp", peer)
+	if err != nil {
+		return fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+	}
+	defer conn.Close()
+
+	handshakeResponse, err := doExtendedHandshakeOnConnection(conn, &hs)
+	if err != nil {
+		return fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+	}
+	fmt.Printf("Peer ID: %s\n", hex.EncodeToString(handshakeResponse.peerID))
 
 	return nil
 }
