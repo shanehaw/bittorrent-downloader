@@ -713,7 +713,7 @@ func downloadFile(downloadTarget, file string) error {
 				if err != nil {
 					fmt.Printf("failed to download piece index %d, reinserting to queue: %s\n", pieceIndex, err.Error())
 					if downloadedablePiece.attempt <= 10 {
-						time.Sleep(100 * time.Millisecond)
+						// time.Sleep(100 * time.Millisecond)
 						piecesToDownload <- pieceToDownload{
 							pieceIndex: pieceIndex,
 							attempt:    downloadedablePiece.attempt + 1,
