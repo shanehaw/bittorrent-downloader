@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -87,6 +88,11 @@ func main() {
 	} else if command == "download" {
 		if err := downloadFile(os.Args[3], os.Args[4]); err != nil {
 			fmt.Printf("failed to download file: %s\n", err.Error())
+			os.Exit(1)
+		}
+	} else if command == "magnet_parse" {
+		if err := magnet_parse(os.Args[2]); err != nil {
+			fmt.Printf("failed to parse magnet: %s\n", err.Error())
 			os.Exit(1)
 		}
 	} else {
@@ -641,6 +647,7 @@ func downloadFile(downloadTarget, file string) error {
 		return fmt.Errorf("error reading file: %s", err.Error())
 	}
 
+	fmt.Println(string(contents))
 	decoded, _, err := decodeBencode(contents)
 	if err != nil {
 		return err
@@ -655,10 +662,10 @@ func downloadFile(downloadTarget, file string) error {
 	info := dict["info"].(map[string]any)
 	fileLength := info["length"].(int)
 	pieceLength := info["piece length"].(int)
-	fmt.Println(string(contents))
 	pieces := info["pieces"].(string)
 	hashByIndex := calcPieceHashes(pieces)
-	fmt.Println("number of pieces:", len(hashByIndex))
+	numOfPieces := len(hashByIndex)
+	fmt.Println("number of pieces:", numOfPieces)
 
 	infoHashBytes, err := getInfoHash(info)
 	if err != nil {
@@ -682,9 +689,8 @@ func downloadFile(downloadTarget, file string) error {
 	}
 
 	workers := make([]pieceDownloader, len(peers))
-	numWorkers := int(math.Min(float64(len(peers)), 10))
-	fmt.Println("creating", numWorkers, "workers")
-	for i, p := range peers[:numWorkers] {
+	fmt.Println("creating", len(peers), "workers")
+	for i, p := range peers {
 		workers[i] = pieceDownloader{
 			peerConnectionString: p,
 			infoHashBytes:        infoHashBytes,
@@ -695,9 +701,9 @@ func downloadFile(downloadTarget, file string) error {
 	}
 
 	// comms channels
-	results := make(chan downloadedPiece, len(hashByIndex))
-	outrightFailures := make(chan int, len(hashByIndex))
-	piecesToDownload := make(chan pieceToDownload, len(hashByIndex))
+	results := make(chan downloadedPiece, numOfPieces)
+	outrightFailures := make(chan int, numOfPieces)
+	piecesToDownload := make(chan pieceToDownload, numOfPieces)
 
 	// start workers
 	fmt.Println("starting workers...")
@@ -774,7 +780,7 @@ func downloadFile(downloadTarget, file string) error {
 	// collect pieces into file
 	fmt.Println("all pieces downloaded and hashes checked, piecing together file")
 	fileBytes := []byte{}
-	for pieceIndex := 0; pieceIndex < len(hashByIndex); pieceIndex++ {
+	for pieceIndex := 0; pieceIndex < numOfPieces; pieceIndex++ {
 		piece, ok := downloadedFilePieces[pieceIndex]
 		if !ok {
 			return fmt.Errorf("missing download piece! %d", pieceIndex)
@@ -881,4 +887,27 @@ func (p pieceDownloader) Download(pieceIndex int) ([]byte, error) {
 		return nil, fmt.Errorf("piece hash did not match hash in torrent file. actual: %s, expected: %s", pieceHash, expectedHash)
 	}
 	return downloadedPiece, nil
+}
+
+func magnet_parse(link string) error {
+	magnetUrl, err := url.Parse(link)
+	if err != nil {
+		return fmt.Errorf("failed to parse magnet url: %s", err.Error())
+	}
+
+	query := magnetUrl.Query()
+	xt := query.Get("xt")
+	// dn := query.Get("dn")
+	tr := query.Get("tr")
+
+	if !strings.HasPrefix(xt, "urn:btih:") {
+		return fmt.Errorf("unexpected magnet url type. Missing urn:bith")
+	}
+
+	infoHash := xt[9:]
+
+	fmt.Printf("Tracker URL: %s\n", tr)
+	fmt.Printf("Info Hash: %s\n", infoHash)
+
+	return nil
 }
