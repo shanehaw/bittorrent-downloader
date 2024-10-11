@@ -737,8 +737,9 @@ func downloadFile(downloadTarget, file string) error {
 	}
 
 	// seed queue
-	fmt.Println("seeding pieces to download queue")
+	fmt.Println("seeding pieces to download queue", len(hashByIndex))
 	for pieceIndex := range hashByIndex {
+		fmt.Println("seeding piece index", pieceIndex)
 		piecesToDownload <- pieceToDownload{
 			pieceIndex: pieceIndex,
 			attempt:    1,
