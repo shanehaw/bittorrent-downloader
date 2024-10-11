@@ -658,6 +658,7 @@ func downloadFile(downloadTarget, file string) error {
 	fmt.Println(string(contents))
 	pieces := info["pieces"].(string)
 	hashByIndex := calcPieceHashes(pieces)
+	fmt.Println("number of pieces:", len(hashByIndex))
 
 	infoHashBytes, err := getInfoHash(info)
 	if err != nil {
