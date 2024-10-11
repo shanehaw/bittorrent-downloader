@@ -681,7 +681,9 @@ func downloadFile(downloadTarget, file string) error {
 	}
 
 	workers := make([]pieceDownloader, len(peers))
-	for i, p := range peers {
+	numWorkers := int(math.Min(float64(len(peers)), 10))
+	fmt.Println("creating", numWorkers, "workers")
+	for i, p := range peers[:numWorkers] {
 		workers[i] = pieceDownloader{
 			peerConnectionString: p,
 			infoHashBytes:        infoHashBytes,
@@ -708,6 +710,7 @@ func downloadFile(downloadTarget, file string) error {
 		go func() {
 			defer pieceDownloaderWaitGroup.Done()
 			for downloadedablePiece := range piecesToDownload {
+				fmt.Println("downloading piece index", downloadedablePiece.pieceIndex)
 				pieceIndex := downloadedablePiece.pieceIndex
 				pieceBytes, err := w.Download(pieceIndex)
 				if err != nil {
@@ -722,6 +725,7 @@ func downloadFile(downloadTarget, file string) error {
 						outrightFailures <- pieceIndex
 					}
 				} else {
+					fmt.Println("downloaded piece index", pieceIndex)
 					results <- downloadedPiece{
 						pieceIndex: pieceIndex,
 						piece:      pieceBytes,
