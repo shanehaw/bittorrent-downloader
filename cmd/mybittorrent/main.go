@@ -695,9 +695,9 @@ func downloadFile(downloadTarget, file string) error {
 	}
 
 	// comms channels
-	results := make(chan downloadedPiece)
-	outrightFailures := make(chan int)
-	piecesToDownload := make(chan pieceToDownload)
+	results := make(chan downloadedPiece, len(hashByIndex))
+	outrightFailures := make(chan int, len(hashByIndex))
+	piecesToDownload := make(chan pieceToDownload, len(hashByIndex))
 
 	// start workers
 	fmt.Println("starting workers...")
