@@ -1021,19 +1021,27 @@ func magnet_handshake(link string) error {
 		if err != nil {
 			return fmt.Errorf("failed wait for bitdfield message: %s", err.Error())
 		}
-		// fmt.Println(response)
 
-		_, _ = parseMessage(response)
-		// fmt.Println("received message with id:", id)
+		// fmt.Println(response)
+		id, _ := parseMessage(response)
+		fmt.Println("received message with id:", id)
+
+		fmt.Println("waiting for extension handshake?")
+		extensionHandshakeMessage, err := readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed to read extension handshake")
+		}
+
+		fmt.Println(extensionHandshakeMessage)
 
 		message, err := createExtensionMessage()
 		if err != nil {
 			return fmt.Errorf("failed to create extension message: %s", err.Error())
 		}
 
-		_, err = sendMessageAndReadExactResponse(conn, message)
+		_, err = conn.Write(message)
 		if err != nil {
-			return fmt.Errorf("failed to send extension handshake or receive response: %s", err.Error())
+			return fmt.Errorf("failed to write interested message")
 		}
 
 		// fmt.Println(string(extendedHandshakeResponse))
@@ -1064,7 +1072,7 @@ func createExtensionMessage() ([]byte, error) {
 	message = append(message, byte(20))
 	message = append(message, byte(0))
 	message = append(message, encoded...)
-	fmt.Println(message)
+	// fmt.Println(message)
 	return message, nil
 }
 
