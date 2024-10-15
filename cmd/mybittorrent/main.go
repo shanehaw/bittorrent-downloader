@@ -20,6 +20,8 @@ import (
 )
 
 const sixteenKilobytes = 16 * 1024
+const supportExtensionsMaskByte = 0x10
+const ourMetadataExtensionId = 1
 
 // Ensures gofmt doesn't remove the "os" encoding/json import (feel free to remove this!)
 var _ = json.Marshal
@@ -279,8 +281,9 @@ func createUniqueId() string {
 }
 
 type handshake struct {
-	infoHash []byte
-	peerID   []byte
+	infoHash          []byte
+	peerID            []byte
+	supportExtensions bool
 }
 
 // 161.35.46.221:51414
@@ -330,7 +333,11 @@ func (hs *handshake) makeMessage() []byte {
 	message := []byte{}
 	message = append(message, []byte{19}...)
 	message = append(message, []byte("BitTorrent protocol")...)
-	message = append(message, []byte{0, 0, 0, 0, 0, 0, 0, 0}...)
+	if hs.supportExtensions {
+		message = append(message, []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00}...)
+	} else {
+		message = append(message, []byte{0, 0, 0, 0, 0, 0, 0, 0}...)
+	}
 	message = append(message, hs.infoHash...)
 	message = append(message, []byte(hs.peerID)...)
 	return message
@@ -349,6 +356,12 @@ func (hs *handshake) makeExtendedMessage() []byte {
 func (hs *handshake) parseMessage(message []byte) error {
 	if len(message) < 68 {
 		return fmt.Errorf("message was too small")
+	}
+	reservedBytes := message[20:28]
+	// fmt.Println("reservedBytes", reservedBytes)
+	// fmt.Println("reservedBytes[5]", reservedBytes[5])
+	if reservedBytes[5]&supportExtensionsMaskByte == supportExtensionsMaskByte {
+		hs.supportExtensions = true
 	}
 	hs.infoHash = message[28:48]
 	hs.peerID = message[48:68]
@@ -556,25 +569,7 @@ func doHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error
 		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
 	}
 
-	responseHandshake := &handshake{}
-	if err := responseHandshake.parseMessage(finalResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse response handshake: %s", err.Error())
-	}
-
-	return responseHandshake, nil
-}
-
-func doExtendedHandshakeOnConnection(conn net.Conn, start *handshake) (*handshake, error) {
-	message := start.makeExtendedMessage()
-	_, err := conn.Write(message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write to tcp connection: %s", err.Error())
-	}
-
-	finalResponse, err := readExactLength(conn, 68)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read from tcp connection: %s", err.Error())
-	}
+	// fmt.Println("peer handshake response", finalResponse)
 
 	responseHandshake := &handshake{}
 	if err := responseHandshake.parseMessage(finalResponse); err != nil {
@@ -582,7 +577,6 @@ func doExtendedHandshakeOnConnection(conn net.Conn, start *handshake) (*handshak
 	}
 
 	return responseHandshake, nil
-
 }
 
 func readExactLength(conn net.Conn, size int) ([]byte, error) {
@@ -992,23 +986,117 @@ func magnet_handshake(link string) error {
 		return fmt.Errorf("did not receive enough peers")
 	}
 
-	peer := peers[0]
-	hs := handshake{
-		infoHash: infoHashBytes,
-		peerID:   createRandomID(),
-	}
+	havePrinted := false
+	for _, peer := range peers {
+		// fmt.Println("starting with peer:", peer)
+		hs := handshake{
+			infoHash:          infoHashBytes,
+			peerID:            createRandomID(),
+			supportExtensions: true,
+		}
 
-	conn, err := net.Dial("tcp", peer)
-	if err != nil {
-		return fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
-	}
-	defer conn.Close()
+		conn, err := net.Dial("tcp", peer)
+		if err != nil {
+			return fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+		}
+		defer conn.Close()
 
-	handshakeResponse, err := doExtendedHandshakeOnConnection(conn, &hs)
-	if err != nil {
-		return fmt.Errorf("failed to do handshake with peer: %s", err.Error())
-	}
-	fmt.Printf("Peer ID: %s\n", hex.EncodeToString(handshakeResponse.peerID))
+		handshakeResponse, err := doHandshakeOnConnection(conn, &hs)
+		if err != nil {
+			return fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+		}
 
+		if !havePrinted {
+			fmt.Printf("Peer ID: %s\n", hex.EncodeToString(handshakeResponse.peerID))
+			havePrinted = true
+		}
+
+		if !handshakeResponse.supportExtensions {
+			// fmt.Printf("peer indicated that it does not support extensions. Try next peer...\n")
+			continue
+		}
+		// fmt.Println("peer supports extensions")
+
+		response, err := waitForNextMessage(conn)
+		if err != nil {
+			return fmt.Errorf("failed wait for bitdfield message: %s", err.Error())
+		}
+		// fmt.Println(response)
+
+		_, _ = parseMessage(response)
+		// fmt.Println("received message with id:", id)
+
+		message, err := createExtensionMessage()
+		if err != nil {
+			return fmt.Errorf("failed to create extension message: %s", err.Error())
+		}
+
+		_, err = sendMessageAndReadExactResponse(conn, message)
+		if err != nil {
+			return fmt.Errorf("failed to send extension handshake or receive response: %s", err.Error())
+		}
+
+		// fmt.Println(string(extendedHandshakeResponse))
+
+	}
 	return nil
+}
+
+func createExtensionMessage() ([]byte, error) {
+	length := uint32(2) // includes id, and extension message id
+
+	payload := map[string]any{
+		"m": map[string]any{
+			"ut_metadata": ourMetadataExtensionId,
+		},
+	}
+	encoded, err := encodeBencode(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bencode extension payload: %s", err.Error())
+	}
+
+	// fmt.Println(string(encoded))
+
+	length += uint32(len(encoded))
+
+	message := []byte{}
+	message = binary.BigEndian.AppendUint32(message, length)
+	message = append(message, byte(20))
+	message = append(message, byte(0))
+	message = append(message, encoded...)
+	fmt.Println(message)
+	return message, nil
+}
+
+func sendMessageAndReadExactResponse(conn net.Conn, message []byte) ([]byte, error) {
+	_, err := conn.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write interested message")
+	}
+
+	return readOneResponse(conn)
+}
+
+func readOneResponse(conn net.Conn) ([]byte, error) {
+	buffer := make([]byte, 4)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read length from tcp connection: %s", err.Error())
+	}
+
+	if n != 4 {
+		return nil, fmt.Errorf("failed to read message length from connection: %s", err.Error())
+	}
+
+	fmt.Println(buffer)
+
+	length := binary.BigEndian.Uint32(buffer)
+	fmt.Println("need to read", length, "bytes for message")
+
+	result, err := readExactLength(conn, int(length))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read length given at beginning of message: %s", err.Error())
+	}
+
+	return append(buffer, result...), nil
 }
