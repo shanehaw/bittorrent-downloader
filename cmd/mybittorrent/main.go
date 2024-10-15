@@ -33,7 +33,6 @@ var _ = json.Marshal
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	// fmt.Println("Logs from your program will appear here!")
-
 	command := os.Args[1]
 
 	if command == "decode" {
@@ -1266,8 +1265,57 @@ func magnet_info(link string) error {
 			return fmt.Errorf("failed to write create metadata message to connection: %s", err.Error())
 		}
 
+		response, err = readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed to read extension message from connection: %s", err.Error())
+		}
+		fmt.Println(response)
+
+		payload = extractPayloadFromExtensionHandshakeMessage(response)
+		fmt.Println(string(payload))
+
+		decodedPayload, index, err := decodeBencode(payload)
+		if err != nil {
+			return fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		jsonBytes, err = json.Marshal(decodedPayload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload to json: %s", err.Error())
+		}
+		fmt.Println("extension payload:", string(jsonBytes))
+
+		metaDataPieceContents, _, err := decodeBencode(payload[index:])
+		if err != nil {
+			return fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		jsonBytes, err = json.Marshal(metaDataPieceContents)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload to json: %s", err.Error())
+		}
+		fmt.Println("other part payload:", string(jsonBytes))
+
+		h := sha1.New()
+		h.Write(payload[index:])
+		hash := hex.EncodeToString(h.Sum(nil))
+
+		pieces := metaDataPieceContents.(map[string]any)["pieces"].(string)
+		hashes := []string{}
+		for cur := 0; cur < len(pieces); cur += 20 {
+			hashes = append(hashes, hex.EncodeToString([]byte(pieces[cur:cur+20])))
+		}
+
+		fmt.Println("Tracker URL:", data.trackerURL)
+		fmt.Println("Length:", metaDataPieceContents.(map[string]any)["length"].(int))
+		fmt.Println("Info Hash:", hash)
+		fmt.Println("Piece Length:", metaDataPieceContents.(map[string]any)["piece length"].(int))
+		fmt.Println("Piece Hashes:")
+		for _, h := range hashes {
+			fmt.Println(h)
+		}
+
 		break
 	}
 	return nil
-
 }
