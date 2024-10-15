@@ -102,6 +102,11 @@ func main() {
 			fmt.Printf("failed to perform magnet handshake: %s\n", err.Error())
 			os.Exit(1)
 		}
+	} else if command == "magnet_info" {
+		if err := magnet_info(os.Args[2]); err != nil {
+			fmt.Printf("failed to get magnet info: %s\n", err.Error())
+			os.Exit(1)
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -1088,6 +1093,30 @@ func createExtensionMessage() ([]byte, error) {
 	return message, nil
 }
 
+func createRequestMetadataMessage(id int) ([]byte, error) {
+	length := uint32(2) // peer message id and metadata id from peer
+
+	requestMessage := map[string]any{
+		"msg_type": 0,
+		"piece":    0,
+	}
+
+	encoded, err := encodeBencode(requestMessage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encoded request message: %s", err.Error())
+	}
+
+	length += uint32(len(encoded))
+
+	message := []byte{}
+	message = binary.BigEndian.AppendUint32(message, length)
+	message = append(message, byte(20)) // extension message
+	message = append(message, byte(id)) // metadata id from peer
+	message = append(message, encoded...)
+
+	return message, nil
+}
+
 func sendMessageAndReadExactResponse(conn net.Conn, message []byte) ([]byte, error) {
 	_, err := conn.Write(message)
 	if err != nil {
@@ -1124,5 +1153,121 @@ func readOneResponse(conn net.Conn) ([]byte, error) {
 func extractPayloadFromExtensionHandshakeMessage(message []byte) []byte {
 	// message len = 4 bytes + message id = 1 byte + extension message id = 1 byte
 	preambleLength := 4 + 1 + 1
-	return message[preambleLength:] 
+	return message[preambleLength:]
+}
+
+func magnet_info(link string) error {
+	data, err := parseMagnetLink(link)
+	if err != nil {
+		return fmt.Errorf("failed to parse magnet link: %s", err.Error())
+	}
+
+	infoHashBytes, err := hex.DecodeString(data.infoHash)
+	if err != nil {
+		return fmt.Errorf("failed to decode info hash: %s", err.Error())
+	}
+
+	responseBodyBytes, err := sendRequest(data.trackerURL, infoHashBytes, 999)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	if len(peers) < 1 {
+		return fmt.Errorf("did not receive enough peers")
+	}
+
+	havePrinted := false
+	for _, peer := range peers {
+		// fmt.Println("starting with peer:", peer)
+		hs := handshake{
+			infoHash:          infoHashBytes,
+			peerID:            createRandomID(),
+			supportExtensions: true,
+		}
+
+		conn, err := net.Dial("tcp", peer)
+		if err != nil {
+			return fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+		}
+		defer conn.Close()
+
+		handshakeResponse, err := doHandshakeOnConnection(conn, &hs)
+		if err != nil {
+			return fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+		}
+
+		if !havePrinted {
+			fmt.Printf("Peer ID: %s\n", hex.EncodeToString(handshakeResponse.peerID))
+			havePrinted = true
+		}
+
+		if !handshakeResponse.supportExtensions {
+			fmt.Printf("peer indicated that it does not support extensions. Try next peer...\n")
+			continue
+		}
+		// fmt.Println("peer supports extensions")
+
+		fmt.Println("reading bitfield message")
+		response, err := readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed wait for bitfield message: %s", err.Error())
+		}
+
+		id, _ := parseMessage(response)
+		fmt.Println("received message with id:", id)
+
+		fmt.Println("waiting for extension handshake?")
+		extensionHandshakeMessage, err := readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed to read extension handshake")
+		}
+
+		payload := extractPayloadFromExtensionHandshakeMessage(extensionHandshakeMessage)
+		decodedPayload, _, err := decodeBencode(payload)
+		if err != nil {
+			return fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		jsonBytes, err := json.Marshal(decodedPayload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload to json: %s", err.Error())
+		}
+		fmt.Println("extension payload:", string(jsonBytes))
+
+		m := decodedPayload.(map[string]any)["m"]
+		utMetadata := m.(map[string]any)["ut_metadata"].(int)
+
+		fmt.Println("Peer Metadata Extension ID:", utMetadata)
+
+		message, err := createExtensionMessage()
+		if err != nil {
+			return fmt.Errorf("failed to create extension message: %s", err.Error())
+		}
+
+		_, err = conn.Write(message)
+		if err != nil {
+			return fmt.Errorf("failed to write interested message")
+		}
+
+		requestMetaMessage, err := createRequestMetadataMessage(utMetadata)
+		if err != nil {
+			return fmt.Errorf("failed to create request metadata message: %s", err.Error())
+		}
+
+		_, err = conn.Write(requestMetaMessage)
+		if err != nil {
+			return fmt.Errorf("failed to write create metadata message to connection: %s", err.Error())
+		}
+
+		break
+	}
+	return nil
+
 }
