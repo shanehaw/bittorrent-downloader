@@ -106,6 +106,16 @@ func main() {
 			fmt.Printf("failed to get magnet info: %s\n", err.Error())
 			os.Exit(1)
 		}
+	} else if command == "magnet_download_piece" {
+		pieceIndex, err := strconv.Atoi(os.Args[5])
+		if err != nil {
+			fmt.Printf("failed to parse piece index: %s\n", err.Error())
+		}
+		if err := magnet_download_piece(os.Args[3], os.Args[4], pieceIndex); err != nil {
+			fmt.Printf("failed to get magnet info: %s\n", err.Error())
+			os.Exit(1)
+		}
+
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -1184,7 +1194,6 @@ func magnet_info(link string) error {
 
 	havePrinted := false
 	for _, peer := range peers {
-		// fmt.Println("starting with peer:", peer)
 		hs := handshake{
 			infoHash:          infoHashBytes,
 			peerID:            createRandomID(),
@@ -1211,18 +1220,14 @@ func magnet_info(link string) error {
 			fmt.Printf("peer indicated that it does not support extensions. Try next peer...\n")
 			continue
 		}
-		// fmt.Println("peer supports extensions")
 
-		fmt.Println("reading bitfield message")
 		response, err := readOneResponse(conn)
 		if err != nil {
 			return fmt.Errorf("failed wait for bitfield message: %s", err.Error())
 		}
 
-		id, _ := parseMessage(response)
-		fmt.Println("received message with id:", id)
+		parseMessage(response)
 
-		fmt.Println("waiting for extension handshake?")
 		extensionHandshakeMessage, err := readOneResponse(conn)
 		if err != nil {
 			return fmt.Errorf("failed to read extension handshake")
@@ -1234,16 +1239,8 @@ func magnet_info(link string) error {
 			return fmt.Errorf("failed to decode payload: %s", err.Error())
 		}
 
-		jsonBytes, err := json.Marshal(decodedPayload)
-		if err != nil {
-			return fmt.Errorf("failed to marshal payload to json: %s", err.Error())
-		}
-		fmt.Println("extension payload:", string(jsonBytes))
-
 		m := decodedPayload.(map[string]any)["m"]
 		utMetadata := m.(map[string]any)["ut_metadata"].(int)
-
-		fmt.Println("Peer Metadata Extension ID:", utMetadata)
 
 		message, err := createExtensionMessage()
 		if err != nil {
@@ -1269,32 +1266,17 @@ func magnet_info(link string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read extension message from connection: %s", err.Error())
 		}
-		fmt.Println(response)
 
 		payload = extractPayloadFromExtensionHandshakeMessage(response)
-		fmt.Println(string(payload))
-
 		decodedPayload, index, err := decodeBencode(payload)
 		if err != nil {
 			return fmt.Errorf("failed to decode payload: %s", err.Error())
 		}
 
-		jsonBytes, err = json.Marshal(decodedPayload)
-		if err != nil {
-			return fmt.Errorf("failed to marshal payload to json: %s", err.Error())
-		}
-		fmt.Println("extension payload:", string(jsonBytes))
-
 		metaDataPieceContents, _, err := decodeBencode(payload[index:])
 		if err != nil {
 			return fmt.Errorf("failed to decode payload: %s", err.Error())
 		}
-
-		jsonBytes, err = json.Marshal(metaDataPieceContents)
-		if err != nil {
-			return fmt.Errorf("failed to marshal payload to json: %s", err.Error())
-		}
-		fmt.Println("other part payload:", string(jsonBytes))
 
 		h := sha1.New()
 		h.Write(payload[index:])
@@ -1314,8 +1296,147 @@ func magnet_info(link string) error {
 		for _, h := range hashes {
 			fmt.Println(h)
 		}
+		break
+	}
+	return nil
+}
+
+func magnet_download_piece(target, link string, pieceIndex int) error {
+	data, err := parseMagnetLink(link)
+	if err != nil {
+		return fmt.Errorf("failed to parse magnet link: %s", err.Error())
+	}
+
+	infoHashBytes, err := hex.DecodeString(data.infoHash)
+	if err != nil {
+		return fmt.Errorf("failed to decode info hash: %s", err.Error())
+	}
+
+	responseBodyBytes, err := sendRequest(data.trackerURL, infoHashBytes, 999)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	if len(peers) < 1 {
+		return fmt.Errorf("did not receive enough peers")
+	}
+
+	var pd pieceDownloader = pieceDownloader{}
+	for _, peer := range peers {
+		hs := handshake{
+			infoHash:          infoHashBytes,
+			peerID:            createRandomID(),
+			supportExtensions: true,
+		}
+
+		conn, err := net.Dial("tcp", peer)
+		if err != nil {
+			return fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+		}
+		defer conn.Close()
+
+		handshakeResponse, err := doHandshakeOnConnection(conn, &hs)
+		if err != nil {
+			return fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+		}
+
+		if !handshakeResponse.supportExtensions {
+			fmt.Printf("peer indicated that it does not support extensions. Try next peer...\n")
+			continue
+		}
+
+		response, err := readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed wait for bitfield message: %s", err.Error())
+		}
+
+		parseMessage(response)
+
+		extensionHandshakeMessage, err := readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed to read extension handshake")
+		}
+
+		payload := extractPayloadFromExtensionHandshakeMessage(extensionHandshakeMessage)
+		decodedPayload, _, err := decodeBencode(payload)
+		if err != nil {
+			return fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		m := decodedPayload.(map[string]any)["m"]
+		utMetadata := m.(map[string]any)["ut_metadata"].(int)
+
+		message, err := createExtensionMessage()
+		if err != nil {
+			return fmt.Errorf("failed to create extension message: %s", err.Error())
+		}
+
+		_, err = conn.Write(message)
+		if err != nil {
+			return fmt.Errorf("failed to write interested message")
+		}
+
+		requestMetaMessage, err := createRequestMetadataMessage(utMetadata)
+		if err != nil {
+			return fmt.Errorf("failed to create request metadata message: %s", err.Error())
+		}
+
+		_, err = conn.Write(requestMetaMessage)
+		if err != nil {
+			return fmt.Errorf("failed to write create metadata message to connection: %s", err.Error())
+		}
+
+		response, err = readOneResponse(conn)
+		if err != nil {
+			return fmt.Errorf("failed to read extension message from connection: %s", err.Error())
+		}
+
+		payload = extractPayloadFromExtensionHandshakeMessage(response)
+		decodedPayload, index, err := decodeBencode(payload)
+		if err != nil {
+			return fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		metaDataPieceContents, _, err := decodeBencode(payload[index:])
+		if err != nil {
+			return fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		// h := sha1.New()
+		// h.Write(payload[index:])
+		// checkInfoHashBytes := h.Sum(nil)
+		// if checkInfoHashBytes
+
+		pieces := metaDataPieceContents.(map[string]any)["pieces"].(string)
+		pieceHashesByIndex := calcPieceHashes(pieces)
+
+		pd = pieceDownloader{
+			peerConnectionString: peer,
+			infoHashBytes:        infoHashBytes,
+			fileLength:           metaDataPieceContents.(map[string]any)["length"].(int),
+			pieceLength:          metaDataPieceContents.(map[string]any)["piece length"].(int),
+			pieceHashesByIndex:   pieceHashesByIndex,
+		}
 
 		break
 	}
+
+	piece, err := pd.Download(pieceIndex)
+	if err != nil {
+		fmt.Errorf("failed to download piece from peer: %s", err.Error())
+	}
+
+	fmt.Println("writing file")
+	if err = os.WriteFile(target, piece, 0666); err != nil {
+		return fmt.Errorf("failed to open temp file to write file: %s", err.Error())
+	}
+
 	return nil
 }
