@@ -1017,9 +1017,10 @@ func magnet_handshake(link string) error {
 		}
 		// fmt.Println("peer supports extensions")
 
-		response, err := waitForNextMessage(conn)
+		fmt.Println("reading bitfield message")
+		response, err := readOneResponse(conn)
 		if err != nil {
-			return fmt.Errorf("failed wait for bitdfield message: %s", err.Error())
+			return fmt.Errorf("failed wait for bitfield message: %s", err.Error())
 		}
 
 		// fmt.Println(response)
