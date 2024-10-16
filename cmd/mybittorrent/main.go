@@ -115,7 +115,11 @@ func main() {
 			fmt.Printf("failed to get magnet info: %s\n", err.Error())
 			os.Exit(1)
 		}
-
+	} else if command == "magnet_download" {
+		if err := magnet_download(os.Args[3], os.Args[4]); err != nil {
+			fmt.Printf("failed to download file: %s\n", err.Error())
+			os.Exit(1)
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -1435,6 +1439,291 @@ func magnet_download_piece(target, link string, pieceIndex int) error {
 
 	fmt.Println("writing file")
 	if err = os.WriteFile(target, piece, 0666); err != nil {
+		return fmt.Errorf("failed to open temp file to write file: %s", err.Error())
+	}
+
+	return nil
+}
+
+type downloadInfo struct {
+	infoHashBytes      []byte
+	fileLength         int
+	pieceLength        int
+	pieceHashesByIndex map[int]string
+}
+
+func getDownloadInfoThroughMetadataFromPeers(peers []string, infoHashBytes []byte) (downloadInfo, error) {
+	numOfPiecesInFile := 0
+	var di *downloadInfo = nil
+	for _, peer := range peers {
+		hs := handshake{
+			infoHash:          infoHashBytes,
+			peerID:            createRandomID(),
+			supportExtensions: true,
+		}
+
+		conn, err := net.Dial("tcp", peer)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to connect via tcp to peer: %s", err.Error())
+		}
+		defer conn.Close()
+
+		handshakeResponse, err := doHandshakeOnConnection(conn, &hs)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to do handshake with peer: %s", err.Error())
+		}
+
+		if !handshakeResponse.supportExtensions {
+			fmt.Printf("peer indicated that it does not support extensions. Try next peer...\n")
+			continue
+		}
+
+		response, err := readOneResponse(conn)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed wait for bitfield message: %s", err.Error())
+		}
+
+		parseMessage(response)
+
+		extensionHandshakeMessage, err := readOneResponse(conn)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to read extension handshake")
+		}
+
+		payload := extractPayloadFromExtensionHandshakeMessage(extensionHandshakeMessage)
+		decodedPayload, _, err := decodeBencode(payload)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		m := decodedPayload.(map[string]any)["m"]
+		utMetadata := m.(map[string]any)["ut_metadata"].(int)
+
+		message, err := createExtensionMessage()
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to create extension message: %s", err.Error())
+		}
+
+		_, err = conn.Write(message)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to write interested message")
+		}
+
+		requestMetaMessage, err := createRequestMetadataMessage(utMetadata)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to create request metadata message: %s", err.Error())
+		}
+
+		_, err = conn.Write(requestMetaMessage)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to write create metadata message to connection: %s", err.Error())
+		}
+
+		response, err = readOneResponse(conn)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to read extension message from connection: %s", err.Error())
+		}
+
+		payload = extractPayloadFromExtensionHandshakeMessage(response)
+		decodedPayload, index, err := decodeBencode(payload)
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		metaDataPieceContents, _, err := decodeBencode(payload[index:])
+		if err != nil {
+			return downloadInfo{}, fmt.Errorf("failed to decode payload: %s", err.Error())
+		}
+
+		// we could verify the hash and fail here but not _really_ necessary right now, so leaving it.
+		// h := sha1.New()
+		// h.Write(payload[index:])
+		// checkInfoHashBytes := h.Sum(nil)
+		// if checkInfoHashBytes
+
+		pieces := metaDataPieceContents.(map[string]any)["pieces"].(string)
+		pieceHashesByIndex := calcPieceHashes(pieces)
+
+		fileLength := metaDataPieceContents.(map[string]any)["length"].(int)
+		pieceLength := metaDataPieceContents.(map[string]any)["piece length"].(int)
+		numOfPiecesInFile = fileLength / pieceLength
+		if fileLength%pieceLength > 0 {
+			numOfPiecesInFile++
+		}
+		fmt.Println("num of pieces in file:", numOfPiecesInFile)
+
+		if di == nil {
+			di = &downloadInfo{
+				infoHashBytes:      infoHashBytes,
+				fileLength:         fileLength,
+				pieceLength:        pieceLength,
+				pieceHashesByIndex: pieceHashesByIndex,
+			}
+		} else {
+			for index, hash := range pieceHashesByIndex {
+				if _, ok := di.pieceHashesByIndex[index]; !ok {
+					di.pieceHashesByIndex[index] = hash
+				}
+			}
+		}
+
+		fmt.Println("current number of piece hashes by index:", len(di.pieceHashesByIndex))
+
+		if len(di.pieceHashesByIndex) == numOfPiecesInFile {
+			return *di, nil
+		}
+	}
+	return downloadInfo{}, fmt.Errorf("failed to find enough peers that supports extensions")
+}
+
+func magnet_download(target, link string) error {
+	data, err := parseMagnetLink(link)
+	if err != nil {
+		return fmt.Errorf("failed to parse magnet link: %s", err.Error())
+	}
+
+	infoHashBytes, err := hex.DecodeString(data.infoHash)
+	if err != nil {
+		return fmt.Errorf("failed to decode info hash: %s", err.Error())
+	}
+
+	responseBodyBytes, err := sendRequest(data.trackerURL, infoHashBytes, 999)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %s", err.Error())
+	}
+
+	resp, _, err := decodeBencode(responseBodyBytes)
+	if err != nil {
+		return fmt.Errorf("error failed to decoded response: %s", err.Error())
+	}
+
+	respDict := resp.(map[string]any)
+	peers := getPeers(respDict)
+	if len(peers) < 1 {
+		return fmt.Errorf("did not receive enough peers")
+	}
+
+	downloadInfo, err := getDownloadInfoThroughMetadataFromPeers(peers, infoHashBytes)
+	if err != nil {
+		return fmt.Errorf("failed to get download info from extension supporting peers: %s", err.Error())
+	}
+
+	fmt.Printf("%+v", downloadInfo)
+
+	if err = downloadFileUsingWorkers(target, peers, downloadInfo); err != nil {
+		return fmt.Errorf("failed to download the file using workers: %s", err.Error())
+	}
+
+	return nil
+}
+
+func downloadFileUsingWorkers(downloadTarget string, peers []string, di downloadInfo) error {
+	numOfPieces := len(di.pieceHashesByIndex)
+	fmt.Println("number of pieces:", numOfPieces)
+
+	workers := make([]pieceDownloader, len(peers))
+	fmt.Println("creating", len(peers), "workers")
+	for i, p := range peers {
+		workers[i] = pieceDownloader{
+			peerConnectionString: p,
+			infoHashBytes:        di.infoHashBytes,
+			fileLength:           di.fileLength,
+			pieceLength:          di.pieceLength,
+			pieceHashesByIndex:   di.pieceHashesByIndex,
+		}
+	}
+
+	// comms channels
+	results := make(chan downloadedPiece, numOfPieces)
+	outrightFailures := make(chan int, numOfPieces)
+	piecesToDownload := make(chan pieceToDownload, numOfPieces)
+
+	// start workers
+	fmt.Println("starting workers...")
+	var pieceDownloaderWaitGroup sync.WaitGroup
+	cleanup := sync.OnceFunc(func() {
+		close(results)
+		close(outrightFailures)
+	})
+	for _, w := range workers {
+		pieceDownloaderWaitGroup.Add(1)
+		go func() {
+			defer pieceDownloaderWaitGroup.Done()
+			for downloadedablePiece := range piecesToDownload {
+				fmt.Println("downloading piece index", downloadedablePiece.pieceIndex)
+				pieceIndex := downloadedablePiece.pieceIndex
+				pieceBytes, err := w.Download(pieceIndex)
+				if err != nil {
+					fmt.Printf("failed to download piece index %d, reinserting to queue: %s\n", pieceIndex, err.Error())
+					if downloadedablePiece.attempt <= 10 {
+						// time.Sleep(100 * time.Millisecond)
+						piecesToDownload <- pieceToDownload{
+							pieceIndex: pieceIndex,
+							attempt:    downloadedablePiece.attempt + 1,
+						}
+					} else {
+						outrightFailures <- pieceIndex
+					}
+				} else {
+					fmt.Println("downloaded piece index", pieceIndex)
+					results <- downloadedPiece{
+						pieceIndex: pieceIndex,
+						piece:      pieceBytes,
+					}
+				}
+			}
+			cleanup()
+		}()
+	}
+
+	// seed queue
+	fmt.Println("seeding pieces to download queue", len(di.pieceHashesByIndex))
+	for pieceIndex := range di.pieceHashesByIndex {
+		fmt.Println("seeding piece index", pieceIndex)
+		piecesToDownload <- pieceToDownload{
+			pieceIndex: pieceIndex,
+			attempt:    1,
+		}
+	}
+
+	// collect results from workers
+	fmt.Println("collecting results from workers")
+	downloadedFilePieces := make(map[int][]byte)
+	failedFilePieces := make(map[int]any)
+	for len(downloadedFilePieces)+len(failedFilePieces) < len(di.pieceHashesByIndex) {
+		select {
+		case dp := <-results:
+			downloadedFilePieces[dp.pieceIndex] = dp.piece
+		case fp := <-outrightFailures:
+			failedFilePieces[fp] = nil
+		}
+	}
+
+	// stop workers
+	fmt.Println("waiting for workers to finish...")
+	close(piecesToDownload)
+	pieceDownloaderWaitGroup.Wait()
+	fmt.Println("workers finished. Checking results...")
+
+	// if any pice persistently failed, then fail
+	if len(failedFilePieces) > 0 {
+		return fmt.Errorf("failed to download one or more pieces: %d", len(failedFilePieces))
+	}
+
+	// collect pieces into file
+	fmt.Println("all pieces downloaded and hashes checked, piecing together file")
+	fileBytes := []byte{}
+	for pieceIndex := 0; pieceIndex < numOfPieces; pieceIndex++ {
+		piece, ok := downloadedFilePieces[pieceIndex]
+		if !ok {
+			return fmt.Errorf("missing download piece! %d", pieceIndex)
+		}
+		fileBytes = append(fileBytes, piece...)
+	}
+
+	// write file
+	fmt.Println("writing file")
+	if err := os.WriteFile(downloadTarget, fileBytes, 0666); err != nil {
 		return fmt.Errorf("failed to open temp file to write file: %s", err.Error())
 	}
 
